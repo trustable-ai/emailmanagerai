@@ -107,5 +107,53 @@ All colors MUST be HSL.
 
   body {
     @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
+}
+
+/* Slim, theme-aware scrollbars */
+@layer utilities {
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.25);
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.4);
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Smooth view transitions */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Make marked headings in chat/threads less aggressive */
+.prose-sm h1, .prose-sm h2, .prose-sm h3 {
+  @apply text-base font-semibold mt-2 mb-1;
+}
+.prose-sm ul {
+  @apply my-1 pl-4 list-disc;
+}
+.prose-sm ol {
+  @apply my-1 pl-4 list-decimal;
+}
+.prose-sm a {
+  @apply text-primary underline;
+}
+.prose-sm code {
+  @apply rounded bg-muted px-1 py-0.5 text-[0.85em];
+}
+.prose-sm blockquote {
+  @apply border-l-2 border-border pl-3 text-muted-foreground;
 }
