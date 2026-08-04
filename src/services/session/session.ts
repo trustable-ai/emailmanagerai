@@ -1,11 +1,14 @@
-// Browser-side session persistence. The app currently uses a temporary
-// mock Google sign-in (no backend secrets are available); the session stores
-// an opaque token plus a display profile. This module is the single place that
-// touches localStorage for auth so the auth strategy can be replaced later
-// (e.g. real Google OAuth + Redis-backed server sessions) without touching the
-// rest of the UI.
+// Browser-side session persistence for the real Google OAuth flow.
+//
+// We store the real Google access token (short-lived, "temporary" OAuth),
+// its expiry, and the display profile. The token is sent to the backend `v1/me`
+// endpoint on every full-page load to validate it against Google — the backend
+// (not localStorage) is the source of truth. This module is the single place
+// that touches storage for auth so the strategy can evolve without touching
+// the rest of the UI.
 
 const TOKEN_KEY = "mailo.session.token";
+const EXP_KEY = "mailo.session.exp";
 const PROFILE_KEY = "mailo.session.profile";
 
 export interface SessionProfile {
@@ -15,46 +18,48 @@ export interface SessionProfile {
   provider: string;
 }
 
+export interface StoredSession {
+  token: string;
+  expiresAt: number; // epoch ms
+  profile: SessionProfile;
+}
+
 export const session = {
-  getToken(): string | null {
+  get(): StoredSession | null {
     try {
-      return localStorage.getItem(TOKEN_KEY);
-    } catch {
-      return null;
-    }
-  },
-
-  getProfile(): SessionProfile | null {
-    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const exp = Number(localStorage.getItem(EXP_KEY) || 0);
       const raw = localStorage.getItem(PROFILE_KEY);
-      return raw ? (JSON.parse(raw) as SessionProfile) : null;
+      if (!token || !raw) return null;
+      const profile = JSON.parse(raw) as SessionProfile;
+      return { token, expiresAt: exp, profile };
     } catch {
       return null;
     }
   },
 
-  save(token: string, profile: SessionProfile): void {
+  save(token: string, expiresInSec: number, profile: SessionProfile): void {
     try {
+      const expiresAt = Date.now() + expiresInSec * 1000;
       localStorage.setItem(TOKEN_KEY, token);
+      localStorage.setItem(EXP_KEY, String(expiresAt));
       localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
     } catch {
-      /* ignore quota errors */
+      /* ignore */
     }
   },
 
   clear(): void {
     try {
       localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(EXP_KEY);
       localStorage.removeItem(PROFILE_KEY);
     } catch {
       /* ignore */
     }
   },
 
-  /** Generate a cryptographically random opaque token. */
-  createToken(): string {
-    const bytes = new Uint8Array(32);
-    crypto.getRandomValues(bytes);
-    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  isExpired(expiresAt: number, skewMs = 60_000): boolean {
+    return Date.now() + skewMs >= expiresAt;
   },
 };

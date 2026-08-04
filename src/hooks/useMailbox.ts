@@ -1,34 +1,69 @@
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
-import { fetchMailbox, performAction, type ActionPayload } from "@/services/api/client";
-import type { MailboxSnapshot } from "@/lib/types";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { loadFolder, loadFolderCounts, loadThread } from "@/services/gmail/gmailSync";
+import type { Email, Folder } from "@/lib/types";
+import { GauthError } from "@/services/gmail/gmailClient";
+import type { LabelIndex } from "@/services/gmail/gmailMapper";
 
-export const MAILBOX_KEY = ["mailbox"] as const;
+export const MAILBOX_KEY = (folder: Folder, token: string) =>
+  ["mailbox", folder, token] as const;
+const COUNTS_KEY = (token: string) => ["counts", token] as const;
+const THREAD_KEY = (threadId: string, token: string) =>
+  ["thread", threadId, token] as const;
 
-export function useMailbox() {
-  return useQuery<MailboxSnapshot>({
-    queryKey: MAILBOX_KEY,
-    queryFn: fetchMailbox,
-    staleTime: 1000 * 10,
+export function useMailbox(folder: Folder, token: string | null) {
+  return useQuery({
+    queryKey: MAILBOX_KEY(folder, token || ""),
+    queryFn: () => loadFolder(token!, folder),
+    enabled: !!token,
+    staleTime: 30_000,
     retry: 1,
   });
 }
 
-export function useMailAction() {
+export function useMailCounts(token: string | null) {
+  return useQuery({
+    queryKey: COUNTS_KEY(token || ""),
+    queryFn: () => loadFolderCounts(token!),
+    enabled: !!token,
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
+export function useThread(threadId: string | null, labelIndex: LabelIndex | null, token: string | null) {
+  return useQuery({
+    queryKey: THREAD_KEY(threadId || "", token || ""),
+    queryFn: () => loadThread(token!, threadId!, labelIndex!),
+    enabled: !!token && !!threadId && !!labelIndex,
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+export function useRefreshMail(token: string | null) {
+  const qc = useQueryClient();
+  return () => {
+    if (!token) return;
+    qc.invalidateQueries({ queryKey: ["mailbox"] });
+    qc.invalidateQueries({ queryKey: ["counts"] });
+    qc.invalidateQueries({ queryKey: ["thread"] });
+  };
+}
+
+export function useMailAction(token: string | null) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (payload: ActionPayload) => performAction(payload),
+    mutationFn: async (fn: () => Promise<void>) => {
+      if (!token) throw new Error("Not authenticated");
+      await fn();
+    },
     onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: MAILBOX_KEY });
+      qc.invalidateQueries({ queryKey: ["mailbox"] });
+      qc.invalidateQueries({ queryKey: ["counts"] });
+      qc.invalidateQueries({ queryKey: ["thread"] });
     },
   });
 }
 
-/** Imperatively refresh the mailbox (e.g. after an AI turn). */
-export function useRefreshMailbox() {
-  const qc = useQueryClient();
-  return () => qc.invalidateQueries({ queryKey: MAILBOX_KEY });
-}
+export { GauthError };
+export type { Email };

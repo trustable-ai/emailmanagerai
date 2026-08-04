@@ -1,119 +1,155 @@
 import { useCallback } from "react";
-import { useMailAction } from "@/hooks/useMailbox";
+import { useAuth } from "@/services/auth/AuthContext";
 import { useMailUI } from "@/store/MailContext";
-import { toast } from "sonner";
+import { useMailAction } from "@/hooks/useMailbox";
+import {
+  b64urlEncodeStr,
+  listMessages,
+  modifyMessage,
+  sendMessage,
+  trashMessage,
+  untrashMessage,
+} from "@/services/gmail/gmailClient";
 import type { Email } from "@/lib/types";
+import type { LabelIndex } from "@/services/gmail/gmailMapper";
+import { toast } from "sonner";
 
 /**
- * Performs a graphical UI action against the mailbox and mirrors it into the
- * AI conversation so the UI and chat stay synchronized. Every graphical action
- * also appears inside the conversation as an assistant-style system note.
+ * Real graphical actions against the Gmail API. Every action mirrors into the
+ * AI conversation (UI <-> chat sync) and refreshes the mailbox.
  */
 export function useEmailActions() {
-  const action = useMailAction();
-  const { pushMessage, notify, setSelectedId, clearMessages } = useMailUI();
+  const { accessToken, user } = useAuth();
+  const { labelIndex } = useMailUI();
+  const action = useMailAction(accessToken);
+  const { pushMessage, notify, setSelectedId } = useMailUI();
+  const token = accessToken;
+  const idx = labelIndex as LabelIndex | null;
+
+  const note = useCallback(
+    (msg: string, kind: "action" | "error" = "action") => {
+      notify({ title: msg, variant: kind === "error" ? "error" : "success" });
+      toast.success(msg);
+      pushMessage({ role: "assistant", content: msg, kind });
+    },
+    [notify, pushMessage],
+  );
 
   const run = useCallback(
-    async (
-      payload: { action: string; id?: string; folder?: string; label?: string; to?: string; subject?: string; body?: string },
-      opts?: { toastMsg?: string; noteMsg?: string; chat?: boolean },
-    ) => {
-      const chat = opts?.chat !== false;
+    async (fn: () => Promise<void>, msg: string) => {
       try {
-        const res = await action.mutateAsync(payload);
-        const msg = opts?.noteMsg || res.message;
-        if (msg) {
-          notify({ title: msg, variant: "success" });
-          toast.success(msg);
-          if (chat) {
-            pushMessage({ role: "assistant", content: msg, kind: "action" });
-          }
-        }
-        return res;
+        await action.mutateAsync(fn);
+        note(msg);
       } catch (e) {
         const text = e instanceof Error ? e.message : "Action failed";
         notify({ title: text, variant: "error" });
         toast.error(text);
-        if (chat) pushMessage({ role: "assistant", content: `⚠️ ${text}`, kind: "action" });
-        throw e;
+        pushMessage({ role: "assistant", content: `⚠️ ${text}`, kind: "error" });
       }
     },
-    [action, pushMessage, notify],
+    [action, note, notify, pushMessage],
   );
 
+  const labelId = (name: string): string | undefined =>
+    idx?.byName[name.toLowerCase()]?.id || idx?.byName[name]?.id;
+
   const archive = useCallback(
-    (e: Email) => run({ action: "archive", id: e.id }, { noteMsg: `Archived ${e.id} — “${e.subject}”.` }),
-    [run],
+    (e: Email) => run(() => modifyMessage(token!, e.id, [], ["INBOX"]), `Archived “${e.subject || e.id}”.`),
+    [run, token],
   );
   const remove = useCallback(
-    (e: Email) =>
-      run({ action: "delete", id: e.id }, { noteMsg: `Moved ${e.id} to Trash.` }),
-    [run],
+    (e: Email) => run(() => trashMessage(token!, e.id), `Moved “${e.subject || e.id}” to Trash.`),
+    [run, token],
   );
   const restore = useCallback(
-    (e: Email) => run({ action: "restore", id: e.id }, { noteMsg: `Restored ${e.id} to Inbox.` }),
-    [run],
+    (e: Email) =>
+      run(async () => {
+        await untrashMessage(token!, e.id);
+        await modifyMessage(token!, e.id, ["INBOX"], ["TRASH"]);
+      }, `Restored “${e.subject || e.id}” to Inbox.`),
+    [run, token],
   );
   const toggleRead = useCallback(
     (e: Email) =>
       run(
-        { action: e.read ? "mark_unread" : "mark_read", id: e.id },
-        { noteMsg: `Marked ${e.id} as ${e.read ? "unread" : "read"}.` },
+        () => modifyMessage(token!, e.id, e.read ? ["UNREAD"] : [], e.read ? [] : ["UNREAD"]),
+        `Marked “${e.subject || e.id}” as ${e.read ? "unread" : "read"}.`,
       ),
-    [run],
+    [run, token],
   );
   const toggleStar = useCallback(
     (e: Email) =>
-      run(
-        { action: e.starred ? "unstar" : "star", id: e.id },
-        { noteMsg: `${e.starred ? "Unstarred" : "Starred"} ${e.id}.` },
-      ),
-    [run],
+      run(() => modifyMessage(token!, e.id, e.starred ? [] : ["STARRED"], e.starred ? ["STARRED"] : []),
+        `${e.starred ? "Unstarred" : "Starred"} “${e.subject || e.id}”.`),
+    [run, token],
   );
   const togglePin = useCallback(
     (e: Email) =>
-      run(
-        { action: e.pinned ? "unpin" : "pin", id: e.id },
-        { noteMsg: `${e.pinned ? "Unpinned" : "Pinned"} ${e.id}.` },
-      ),
-    [run],
+      run(() => modifyMessage(token!, e.id, e.pinned ? [] : ["IMPORTANT"], e.pinned ? ["IMPORTANT"] : []),
+        `${e.pinned ? "Unpinned" : "Pinned"} “${e.subject || e.id}”.`),
+    [run, token],
   );
   const move = useCallback(
     (e: Email, folder: string) =>
-      run({ action: "move", id: e.id, folder }, { noteMsg: `Moved ${e.id} to ${folder}.` }),
-    [run],
+      run(async () => {
+        if (folder === "trash") {
+          await trashMessage(token!, e.id);
+        } else if (folder === "spam") {
+          await modifyMessage(token!, e.id, ["SPAM"], ["INBOX"]);
+        } else if (folder === "inbox") {
+          await untrashMessage(token!, e.id);
+          await modifyMessage(token!, e.id, ["INBOX"], ["SPAM", "TRASH"]);
+        } else if (folder === "archive") {
+          await modifyMessage(token!, e.id, [], ["INBOX"]);
+        } else {
+          const id = labelId(folder);
+          if (id) await modifyMessage(token!, e.id, [id], ["INBOX"]);
+        }
+      }, `Moved “${e.subject || e.id}” to ${folder}.`),
+    [run, token, labelId],
   );
   const addLabel = useCallback(
-    (e: Email, label: string) =>
-      run({ action: "label", id: e.id, label }, { noteMsg: `Labeled ${e.id} as ${label}.` }),
-    [run],
+    (e: Email, label: string) => {
+      const id = labelId(label);
+      if (!id) {
+        note(`Label “${label}” not found in your Gmail.`, "error");
+        return Promise.resolve();
+      }
+      return run(() => modifyMessage(token!, e.id, [id], []), `Labeled “${e.subject || e.id}” as ${label}.`);
+    },
+    [run, token, labelId, note],
   );
   const removeLabel = useCallback(
-    (e: Email, label: string) =>
-      run({ action: "unlabel", id: e.id, label }, { noteMsg: `Removed label ${label} from ${e.id}.` }),
-    [run],
+    (e: Email, label: string) => {
+      const id = labelId(label);
+      if (!id) return Promise.resolve();
+      return run(() => modifyMessage(token!, e.id, [], [id]), `Removed label “${label}” from “${e.subject || e.id}”.`);
+    },
+    [run, token, labelId],
   );
   const send = useCallback(
-    (to: string, subject: string, body: string) =>
-      run(
-        { action: "send", to, subject, body },
-        { noteMsg: `Message sent to ${to || "—"}.` },
-      ),
-    [run],
+    (to: string, subject: string, body: string) => {
+      const from = user?.email ? `${user.name || ""} <${user.email}>` : "";
+      const rfc = [
+        to ? `To: ${to}` : "",
+        from ? `From: ${from}` : "",
+        `Subject: ${subject}`,
+        "Content-Type: text/plain; charset=UTF-8",
+        "",
+        body,
+      ].filter((l, i) => !(i === 0 && l === "")).join("\n");
+      const raw = b64urlEncodeStr(rfc);
+      return run(() => sendMessage(token!, raw).then(() => {}), `Message sent to ${to || "—"}.`);
+    },
+    [run, token, user],
   );
-  const saveDraft = useCallback(
-    (subject: string, body: string) =>
-      run({ action: "save_draft", subject, body }, { noteMsg: "Draft saved." }),
-    [run],
-  );
-  const deleteSpam = useCallback(
-    () => run({ action: "delete_spam" }, { noteMsg: "Moved spam to Trash." }),
-    [run],
-  );
-  const emptyTrash = useCallback(
-    () => run({ action: "empty_trash" }, { noteMsg: "Emptied trash." }),
-    [run],
-  );
+  const deleteSpam = useCallback(() => {
+    return run(async () => {
+      const refs = await listMessages(token!, { labelIds: ["SPAM"], max: 100 });
+      // Trashing spam empties the Spam folder (Gmail has no permanent-delete in modify scope).
+      for (const r of refs) await trashMessage(token!, r.id);
+    }, `Moved ${0} spam email(s) to Trash.`);
+  }, [run, token]);
 
   return {
     run,
@@ -127,11 +163,8 @@ export function useEmailActions() {
     addLabel,
     removeLabel,
     send,
-    saveDraft,
     deleteSpam,
-    emptyTrash,
     setSelectedId,
-    clearMessages,
     isPending: action.isPending,
   };
 }

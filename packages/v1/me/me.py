@@ -1,31 +1,19 @@
 """Session / userinfo endpoint (v1/me).
 
-This is the backend validation point for the application session. On a
-full-page load the frontend sends the persisted opaque token in an
-`Authorization: Bearer <token>` header to `/api/my/v1/me`; the response carries
-the authoritative identity for the current session. Protected routes only
-render once this call succeeds.
-
-Today the mailbox is a demo dataset served by the `v1/chat` action, so the
-"session" is a temporary Google OAuth mock and this endpoint returns the
-connected demo Google account. To go live, replace `resolve_account` with a
-real token validation (Redis-backed session lookup or a Google userinfo
-exchange) and keep this same response shape — the frontend does not need to
-change.
+Validates the user's real Google OAuth access token on every full-page load.
+The frontend sends the token in an `Authorization: Bearer <token>` header; this
+endpoint calls Google's userinfo endpoint with that token and returns the
+authoritative identity. A missing or invalid token yields `ok: false`, so the
+frontend clears the session and re-authenticates. No Google client secret is
+used or stored here — only the public userinfo endpoint.
 """
 
 import json
+import urllib.request
+import urllib.error
 
 
-# Demo Google account connected to the mailbox. In a real deployment this is
-# derived from the validated session token, never trusted from the request.
-DEMO_ACCOUNT = {
-    "name": "Alex Carter",
-    "email": "alex.carter@gmail.com",
-    "avatar": "AC",
-    "provider": "Google",
-    "lastSync": "2024-08-04T09:32:00Z",
-}
+USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
 def _bearer(args):
@@ -38,17 +26,40 @@ def _bearer(args):
     return ""
 
 
-def resolve_account(args):
-    """Return the authoritative account for the current session.
+def _userinfo(token):
+    req = urllib.request.Request(
+        USERINFO_URL,
+        headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read().decode("utf-8")
+    return json.loads(raw)
 
-    A non-empty Bearer token must be present; an absent token means there is no
-    session to validate. (In the mock we do not yet inspect the token value;
-    the real implementation validates it against the session store.)
-    """
+
+def resolve_account(args):
     token = _bearer(args).replace("Bearer", "", 1).strip()
     if not token:
         return {"ok": False, "error": "No session token"}
-    return {"ok": True, "account": DEMO_ACCOUNT}
+    try:
+        info = _userinfo(token)
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "error": "Google rejected token", "status": exc.code}
+    except Exception as exc:
+        return {"ok": False, "error": "Session validation failed: %s" % exc}
+    email = info.get("email") or ""
+    name = info.get("name") or info.get("given_name") or email or "Google User"
+    avatar = info.get("picture") or ""
+    if not email:
+        return {"ok": False, "error": "No email in userinfo"}
+    return {
+        "ok": True,
+        "account": {
+            "name": name,
+            "email": email,
+            "avatar": avatar,
+            "provider": "Google",
+        },
+    }
 
 
 def main(args, ctx=None):

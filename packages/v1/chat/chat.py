@@ -317,6 +317,27 @@ def api_action(args):
 # Conversational flow (original chat contract) ------------------------------
 # ---------------------------------------------------------------------------
 
+def generate_flow(args):
+    """Generative AI turn with real email context provided by the frontend.
+
+    Request fields:
+      prompt   : the user's instruction (string)
+      context  : real email content to ground the answer (string, optional)
+      messages : optional conversational history (list)
+    Returns the streaming contract {"output": <str>, "streaming": True}.
+    """
+    prompt = args.get("prompt", "") or ""
+    context = args.get("context", "") or ""
+    user_prompt = prompt if not context else (prompt + "\n\nEmail:\n" + context)
+    try:
+        ai = llm_mod.LLM(args)
+        out = ai.generate(args, ai._system_prompt(), user_prompt, history=args.get("messages"))
+    except Exception as e:
+        traceback.print_exc()
+        out = "Error: %s\n" % str(e)
+    return {"output": out, "streaming": True}
+
+
 def chat_flow(args):
     inp = args.get("input", "") or ""
 
@@ -355,4 +376,6 @@ def chat(args):
         return api_state(args)
     if mode == "action":
         return api_action(args)
+    if mode == "generate":
+        return generate_flow(args)
     return chat_flow(args)

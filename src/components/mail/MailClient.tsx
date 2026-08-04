@@ -1,8 +1,10 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { useMemo } from "react";
-import { Sparkles, Loader2, WifiOff, RefreshCw } from "lucide-react";
-import { useMailbox } from "@/hooks/useMailbox";
+import { useEffect, useMemo } from "react";
+import { Loader2, WifiOff, RefreshCw } from "lucide-react";
+import { useAuth } from "@/services/auth/AuthContext";
+import { useMailbox, useMailCounts, useRefreshMail } from "@/hooks/useMailbox";
 import { useMailUI } from "@/store/MailContext";
+import type { Folder } from "@/lib/types";
 import { Sidebar } from "@/components/mail/Sidebar";
 import { TopBar } from "@/components/mail/TopBar";
 import { EmailList } from "@/components/mail/EmailList";
@@ -15,39 +17,59 @@ import { BottomNav } from "@/components/mail/BottomNav";
 import { EmptyState } from "@/components/mail/Skeletons";
 
 export function MailClient() {
-  const { data, isLoading, isFetching, error, refetch } = useMailbox();
-  const { sidebarOpen, chatOpen, previewOpen, selectedId, setSidebarOpen, setChatOpen } = useMailUI();
+  const { user, accessToken } = useAuth();
+  const {
+    activeFolder,
+    sidebarOpen,
+    chatOpen,
+    previewOpen,
+    selectedId,
+    setSidebarOpen,
+    setChatOpen,
+    setLabelIndex,
+    setWorkspaceEmails,
+  } = useMailUI();
 
-  const account = data?.account;
-  const labels = data?.labels ?? [];
-  const emails = data?.emails ?? [];
-  const counts = data?.counts ?? {};
-  const syncing = isFetching && !isLoading;
+  const token = accessToken;
+  const mailbox = useMailbox(activeFolder as Folder, token);
+  const counts = useMailCounts(token);
+  const refresh = useRefreshMail(token);
+  const syncing = mailbox.isFetching && !mailbox.isLoading;
+
+  // Share the Gmail label index + the active folder's emails with the rest of
+  // the app (actions, AI router, thread viewer).
+  useEffect(() => {
+    if (mailbox.data?.labelIndex) setLabelIndex(mailbox.data.labelIndex);
+  }, [mailbox.data?.labelIndex, setLabelIndex]);
+  useEffect(() => {
+    setWorkspaceEmails(mailbox.data?.emails ?? []);
+  }, [mailbox.data?.emails, setWorkspaceEmails]);
 
   const sidebarEmails = useMemo(
-    () => emails.map((e) => ({
-      id: e.id,
-      read: e.read,
-      folder: e.folder,
-      starred: e.starred,
-      pinned: e.pinned,
-      priority: e.priority,
-      labels: e.labels,
+    () => (mailbox.data?.emails ?? []).map((e) => ({
+      id: e.id, read: e.read, folder: e.folder, starred: e.starred,
+      pinned: e.pinned, priority: e.priority, labels: e.labels,
     })),
-    [emails],
+    [mailbox.data?.emails],
   );
 
-  // Gmail connect / first-load error state.
-  if (error && !data) {
+  const account = user
+    ? { name: user.name, email: user.email, avatar: user.avatar, provider: user.provider }
+    : { name: "", email: "", avatar: "", provider: "Google" };
+
+  if (mailbox.error && !mailbox.data) {
+    const isAuth = (mailbox.error as Error)?.name === "GauthError";
     return (
       <div className="flex h-screen items-center justify-center bg-background px-4">
         <EmptyState
-          title="Can't reach Gmail"
-          text="Your mailbox couldn't be loaded. Check the connection and try again."
+          title={isAuth ? "Google session expired" : "Can't reach Gmail"}
+          text={isAuth
+            ? "Your temporary Google access has expired. Please sign in again."
+            : "Your mailbox couldn't be loaded. Check the connection and try again."}
           icon={<WifiOff className="h-8 w-8" />}
           action={
             <button
-              onClick={() => refetch()}
+              onClick={() => refresh()}
               className="mt-4 flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
             >
               <RefreshCw className="h-4 w-4" /> Retry
@@ -60,18 +82,17 @@ export function MailClient() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background">
-      {/* floating AI button (mobile) — kept for layout parity */}
-      <span className="hidden" aria-hidden />
-
-      <TopBar account={account ?? { name: "", email: "", avatar: "", provider: "Google", lastSync: "" }} syncing={syncing} onSync={() => refetch()} error={error} />
+      <TopBar account={account} syncing={syncing} onSync={refresh} error={mailbox.error} />
 
       <div className="relative flex flex-1 overflow-hidden">
-        {/* DESKTOP SIDEBAR */}
         <aside className="hidden w-64 shrink-0 lg:block">
-          <Sidebar counts={counts} labels={labels} allEmails={sidebarEmails as never} />
+          <Sidebar
+            counts={counts.data ?? {}}
+            labels={mailbox.data?.labels ?? []}
+            allEmails={sidebarEmails as never}
+          />
         </aside>
 
-        {/* MOBILE SIDEBAR DRAWER */}
         <AnimatePresence>
           {sidebarOpen && (
             <>
@@ -89,39 +110,43 @@ export function MailClient() {
                 transition={{ type: "spring", stiffness: 320, damping: 32 }}
                 className="fixed inset-y-0 left-0 z-50 w-72 lg:hidden"
               >
-                <Sidebar counts={counts} labels={labels} allEmails={sidebarEmails as never} />
+                <Sidebar
+                  counts={counts.data ?? {}}
+                  labels={mailbox.data?.labels ?? []}
+                  allEmails={sidebarEmails as never}
+                />
               </motion.aside>
             </>
           )}
         </AnimatePresence>
 
-        {/* MIDDLE: list + preview */}
         <main className="flex flex-1 overflow-hidden">
-          {/* Email list — hidden on mobile when a thread is open */}
           <section
-            className={`${
-              selectedId && previewOpen ? "hidden md:flex" : "flex"
-            } w-full shrink-0 flex-col border-r border-border/60 md:w-96`}
+            className={`${selectedId && previewOpen ? "hidden md:flex" : "flex"} w-full shrink-0 flex-col border-r border-border/60 md:w-96`}
           >
-            <EmailList emails={emails} loading={isLoading} error={error} />
+            <EmailList
+              emails={mailbox.data?.emails ?? []}
+              loading={mailbox.isLoading}
+              error={mailbox.error}
+            />
           </section>
 
-          {/* Thread viewer — mobile slides over */}
           <section
-            className={`${
-              selectedId && previewOpen ? "flex" : "hidden md:flex"
-            } flex-1 flex-col`}
+            className={`${selectedId && previewOpen ? "flex" : "hidden md:flex"} flex-1 flex-col`}
           >
-            <ThreadViewer emails={emails} selectedId={selectedId} loading={isLoading} />
+            <ThreadViewer
+              selectedId={selectedId}
+              token={token}
+              labelIndex={mailbox.data?.labelIndex ?? null}
+              loading={mailbox.isLoading}
+            />
           </section>
         </main>
 
-        {/* DESKTOP AI CHAT */}
         <aside className="hidden w-96 shrink-0 border-l border-border/60 xl:block">
           <AIChat />
         </aside>
 
-        {/* MOBILE AI CHAT DRAWER */}
         <AnimatePresence>
           {chatOpen && (
             <>
@@ -146,14 +171,11 @@ export function MailClient() {
         </AnimatePresence>
       </div>
 
-      {/* floating compose button */}
       <FloatingCompose />
-
       <BottomNav />
 
-      {/* first-load sync overlay */}
       <AnimatePresence>
-        {isLoading && (
+        {mailbox.isLoading && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -162,8 +184,8 @@ export function MailClient() {
           >
             <div className="flex flex-col items-center gap-3 text-center">
               <Loader2 className="h-8 w-8 animate-spin text-primary" />
-              <p className="text-sm font-medium">Connecting to Gmail…</p>
-              <p className="text-xs text-muted-foreground">Syncing your mailbox</p>
+              <p className="text-sm font-medium">Loading your Gmail…</p>
+              <p className="text-xs text-muted-foreground">Fetching messages from {activeFolder}</p>
             </div>
           </motion.div>
         )}
@@ -190,7 +212,7 @@ function FloatingCompose() {
       aria-label="Compose"
       title="Compose"
     >
-      <Sparkles className="h-5 w-5" />
+      <span className="text-xl leading-none">+</span>
     </motion.button>
   );
 }

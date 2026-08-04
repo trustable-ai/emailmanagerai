@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import type { AppNotification, ChatMessage, Email, Folder } from "@/lib/types";
+import type { LabelIndex } from "@/services/gmail/gmailMapper";
 
 interface ComposerState {
   open: boolean;
@@ -49,6 +50,12 @@ interface MailUIContextValue {
   notify: (n: Omit<AppNotification, "id" | "ts">) => void;
   dismissNotification: (id: number) => void;
   clearNotifications: () => void;
+  // gmail label map shared with actions/AI
+  labelIndex: LabelIndex | null;
+  setLabelIndex: (idx: LabelIndex | null) => void;
+  // all loaded emails across folders (for AI client-side queries)
+  setWorkspaceEmails: (emails: Email[]) => void;
+  workspaceEmails: Email[];
 }
 
 const MailUIContext = createContext<MailUIContextValue | undefined>(undefined);
@@ -67,6 +74,8 @@ export function MailUIProvider({ children }: { children: ReactNode }) {
   const [composer, setComposer] = useState<ComposerState>({ open: false });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [labelIndex, setLabelIndex] = useState<LabelIndex | null>(null);
+  const [workspaceEmails, setWorkspaceEmails] = useState<Email[]>([]);
 
   const pushMessage = useCallback((m: Omit<ChatMessage, "id">) => {
     const msg: ChatMessage = { id: nextId(), ...m };
@@ -130,6 +139,10 @@ export function MailUIProvider({ children }: { children: ReactNode }) {
       notify,
       dismissNotification,
       clearNotifications,
+      labelIndex,
+      setLabelIndex,
+      workspaceEmails,
+      setWorkspaceEmails,
     }),
     [
       activeFolder,
@@ -142,6 +155,8 @@ export function MailUIProvider({ children }: { children: ReactNode }) {
       composer,
       messages,
       notifications,
+      labelIndex,
+      workspaceEmails,
       pushMessage,
       updateMessage,
       clearMessages,
@@ -150,6 +165,8 @@ export function MailUIProvider({ children }: { children: ReactNode }) {
       clearNotifications,
       openComposer,
       closeComposer,
+      setLabelIndex,
+      setWorkspaceEmails,
     ],
   );
 

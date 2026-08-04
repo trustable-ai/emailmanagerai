@@ -1,47 +1,115 @@
-// Gmail synchronization service.
-//
-// In this build the mailbox is served by the app's own data store through the
-// `v1/chat` action, so "sync" is a simulated progress sequence that refreshes
-// the server snapshot. The interface mirrors what a real Gmail API client
-// would expose (folders, labels, threads, attachments) so this file is the
-// single place to swap in a real Gmail API integration later without touching
-// the UI.
+// High-level Gmail sync: load a folder's messages, folder counts, and threads.
+import type { Email, Folder } from "@/lib/types";
+import {
+  getMessage,
+  getThread,
+  listLabels,
+  listMessages,
+  type GmailLabel,
+  type GmailMessage,
+} from "@/services/gmail/gmailClient";
+import {
+  buildLabelIndex,
+  folderQuery,
+  mapMessage,
+  type LabelIndex,
+} from "@/services/gmail/gmailMapper";
 
-import { fetchMailbox } from "@/services/api/client";
-import type { MailboxSnapshot } from "@/lib/types";
-
-export interface SyncStep {
-  label: string;
-  done: boolean;
+export interface MailboxLoadResult {
+  emails: Email[];
+  labels: GmailLabel[];
+  labelIndex: LabelIndex;
 }
 
-export const GMAIL_FOLDERS = [
-  "inbox",
-  "sent",
-  "drafts",
-  "spam",
-  "trash",
-] as const;
+const FOLDER_LABEL_IDS: Record<string, string> = {
+  inbox: "INBOX",
+  sent: "SENT",
+  drafts: "DRAFT",
+  spam: "SPAM",
+  trash: "TRASH",
+};
 
-export const GMAIL_SYNC_STEPS: SyncStep[] = [
-  { label: "Connecting to Gmail", done: false },
-  { label: "Syncing Inbox", done: false },
-  { label: "Syncing Sent", done: false },
-  { label: "Syncing Drafts", done: false },
-  { label: "Syncing Spam & Trash", done: false },
-  { label: "Indexing labels", done: false },
-  { label: "Indexing attachments", done: false },
-];
-
-/** Run a simulated sync with live progress callbacks, then refresh snapshot. */
-export async function syncGmail(
-  onStep: (index: number) => void,
-  signal?: AbortSignal,
-): Promise<MailboxSnapshot> {
-  for (let i = 0; i < GMAIL_SYNC_STEPS.length; i++) {
-    if (signal?.aborted) throw new Error("Sync aborted");
-    await new Promise((r) => setTimeout(r, 220 + Math.random() * 180));
-    onStep(i);
-  }
-  return fetchMailbox();
+/**
+ * Load the messages for a logical folder. Lists message refs then fetches each
+ * with `metadata` (enough for the list view). Threads are fetched fully on
+ * demand when an email is opened.
+ */
+export async function loadFolder(
+  token: string,
+  folder: Folder,
+): Promise<MailboxLoadResult> {
+  const labels = await listLabels(token);
+  const labelIndex = buildLabelIndex(labels);
+  const q = folderQuery(folder);
+  const refs = await listMessages(token, { ...q, max: 60 });
+  // Fetch each message's metadata in bounded parallelism.
+  const messages = await pmap(refs, (r) => getMessage(token, r.id, "metadata"), 6);
+  const emails = messages
+    .map((m) => mapMessage(m, labelIndex))
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  return { emails, labels: labels.filter((l) => l.type !== "system"), labelIndex };
 }
+
+/** Lightweight folder counts (unread for inbox, total for others). */
+export async function loadFolderCounts(
+  token: string,
+): Promise<Record<string, number>> {
+  const out: Record<string, number> = {
+    inbox: 0,
+    starred: 0,
+    important: 0,
+    sent: 0,
+    drafts: 0,
+    spam: 0,
+    trash: 0,
+    archive: 0,
+  };
+  // Unread inbox count.
+  const unreadInbox = await listMessages(token, { labelIds: ["INBOX"], q: "is:unread", max: 100 });
+  out.inbox = unreadInbox.length;
+  // Starred / important totals (search).
+  const [starred, important] = await Promise.all([
+    listMessages(token, { q: "is:starred", max: 100 }),
+    listMessages(token, { q: "is:important", max: 100 }),
+  ]);
+  out.starred = starred.length;
+  out.important = important.length;
+  // Folder totals via label list counts.
+  await Promise.all(
+    (["sent", "drafts", "spam", "trash"] as const).map(async (f) => {
+      const id = FOLDER_LABEL_IDS[f];
+      const refs = await listMessages(token, { labelIds: [id], max: 100 });
+      out[f] = refs.length;
+    }),
+  );
+  return out;
+}
+
+/** Load the full thread for an open email. */
+export async function loadThread(
+  token: string,
+  threadId: string,
+  labelIndex: LabelIndex,
+): Promise<Email[]> {
+  const thread = await getThread(token, threadId);
+  return thread.map((m) => mapMessage(m, labelIndex));
+}
+
+async function pmap<T, R>(
+  items: T[],
+  fn: (item: T) => Promise<R>,
+  concurrency: number,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let i = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+export type { GmailMessage };

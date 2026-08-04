@@ -22,12 +22,13 @@ import { motion } from "framer-motion";
 import type { Email } from "@/lib/types";
 import { useMailUI } from "@/store/MailContext";
 import { useEmailActions } from "@/hooks/useEmailActions";
+import { useThread } from "@/hooks/useMailbox";
+import type { LabelIndex } from "@/services/gmail/gmailMapper";
 import {
   formatSize,
   fullName,
   fullDate,
   labelClass,
-  threadEmails,
 } from "@/lib/mailUtils";
 import { Avatar } from "@/components/mail/Avatar";
 import { ThreadSkeleton, EmptyState } from "@/components/mail/Skeletons";
@@ -36,30 +37,30 @@ import { cn } from "@/lib/utils";
 marked.setOptions({ gfm: true, breaks: true });
 
 interface ThreadViewerProps {
-  emails: Email[];
   selectedId: string | null;
+  token: string | null;
+  labelIndex: LabelIndex | null;
   loading: boolean;
 }
 
-export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps) {
+export function ThreadViewer({ selectedId, token, labelIndex, loading }: ThreadViewerProps) {
   const {
     setSelectedId,
     setPreviewOpen,
     openComposer,
-    activeFolder,
     pushMessage,
+    workspaceEmails,
+    activeFolder,
   } = useMailUI();
   const acts = useEmailActions();
 
   const selected = useMemo(
-    () => emails.find((e) => e.id === selectedId) ?? null,
-    [emails, selectedId],
+    () => workspaceEmails.find((e) => e.id === selectedId) ?? null,
+    [workspaceEmails, selectedId],
   );
 
-  const thread = useMemo(
-    () => (selected ? threadEmails(emails, selected.threadId) : []),
-    [emails, selected],
-  );
+  const threadQuery = useThread(selected?.threadId ?? null, labelIndex, token);
+  const thread = threadQuery.data ?? (selected ? [selected] : []);
 
   if (loading && !selected) return <ThreadSkeleton />;
 
@@ -109,10 +110,7 @@ export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps)
           <CornerUpRight className="h-4 w-4" />
           <span className="hidden lg:inline">Reply All</span>
         </ToolBtn>
-        <ToolBtn
-          title="Forward"
-          onClick={() => openComposer({ forwardOf: selected })}
-        >
+        <ToolBtn title="Forward" onClick={() => openComposer({ forwardOf: selected })}>
           <Forward className="h-4 w-4" />
           <span className="hidden sm:inline">Forward</span>
         </ToolBtn>
@@ -128,11 +126,7 @@ export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps)
             selected.folder === "trash" ? acts.restore(selected) : acts.remove(selected)
           }
         >
-          {selected.folder === "trash" ? (
-            <InboxIcon className="h-4 w-4" />
-          ) : (
-            <Trash2 className="h-4 w-4" />
-          )}
+          {selected.folder === "trash" ? <InboxIcon className="h-4 w-4" /> : <Trash2 className="h-4 w-4" />}
         </ToolBtn>
         <ToolBtn
           title={selected.read ? "Mark unread" : "Mark read"}
@@ -144,32 +138,14 @@ export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps)
           title={selected.starred ? "Unstar" : "Star"}
           onClick={() => acts.toggleStar(selected)}
         >
-          <Star
-            className={cn(
-              "h-4 w-4",
-              selected.starred && "fill-amber-400 text-amber-400",
-            )}
-          />
+          <Star className={cn("h-4 w-4", selected.starred && "fill-amber-400 text-amber-400")} />
         </ToolBtn>
-        <ToolBtn
-          title={selected.pinned ? "Unpin" : "Pin"}
-          onClick={() => acts.togglePin(selected)}
-        >
-          <Pin
-            className={cn(
-              "h-4 w-4",
-              selected.pinned && "fill-amber-400 text-amber-400",
-            )}
-          />
+        <ToolBtn title={selected.pinned ? "Unpin" : "Pin"} onClick={() => acts.togglePin(selected)}>
+          <Pin className={cn("h-4 w-4", selected.pinned && "fill-amber-400 text-amber-400")} />
         </ToolBtn>
 
         <div className="mx-1 h-5 w-px bg-border/60" />
-
-        {/* move menu (simple inline) */}
-        <MoveMenu
-          onMove={(f) => acts.move(selected, f)}
-          folder={selected.folder}
-        />
+        <MoveMenu onMove={(f) => acts.move(selected, f)} folder={selected.folder} />
         <LabelMenu
           labels={selected.labels}
           onAdd={(l) => acts.addLabel(selected, l)}
@@ -181,7 +157,7 @@ export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps)
             pushMessage({
               role: "system",
               kind: "system",
-              content: `Opened actions for ${selected.id}: ${selected.subject}`,
+              content: `Opened actions for ${selected.subject}`,
             })
           }
         >
@@ -209,6 +185,8 @@ export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps)
             ))}
           </div>
 
+          {threadQuery.isLoading && <ThreadSkeleton />}
+
           <div className="space-y-3">
             {thread.map((e, i) => (
               <motion.div
@@ -216,7 +194,10 @@ export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps)
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: i * 0.05 }}
-                className="rounded-2xl border border-border/60 bg-card/60 p-4 shadow-sm backdrop-blur-sm"
+                className={cn(
+                  "rounded-2xl border bg-card/60 p-4 shadow-sm backdrop-blur-sm",
+                  e.id === selected.id ? "border-primary/40" : "border-border/60",
+                )}
               >
                 <div className="flex items-start gap-3">
                   <Avatar name={fullName(e.from)} size="md" />
@@ -235,7 +216,7 @@ export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps)
                     <div
                       className="prose prose-sm mt-3 max-w-none dark:prose-invert prose-p:my-1 prose-headings:mb-1"
                       dangerouslySetInnerHTML={{
-                        __html: marked.parse(e.body || "") as string,
+                        __html: marked.parse(e.body || e.snippet || "_(loading body…)_") as string,
                       }}
                     />
 
@@ -254,9 +235,7 @@ export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps)
                                 {a.type}
                               </span>
                               <span className="font-medium">{a.name}</span>
-                              <span className="text-muted-foreground">
-                                {formatSize(a.size)}
-                              </span>
+                              <span className="text-muted-foreground">{formatSize(a.size)}</span>
                               <button
                                 className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
                                 title="Download"
@@ -276,21 +255,6 @@ export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps)
                       </div>
                     ) : null}
                   </div>
-                </div>
-
-                <div className="mt-3 flex gap-2 border-t border-border/40 pt-2">
-                  <button
-                    onClick={() => openComposer({ replyTo: e })}
-                    className="rounded-lg px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
-                  >
-                    Reply
-                  </button>
-                  <button
-                    onClick={() => openComposer({ forwardOf: e })}
-                    className="rounded-lg px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
-                  >
-                    Forward
-                  </button>
                 </div>
               </motion.div>
             ))}
@@ -315,10 +279,7 @@ export function ThreadViewer({ emails, selectedId, loading }: ThreadViewerProps)
             <div className="mt-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-300">
               <RestoreIcon className="h-3.5 w-3.5" />
               This message is in Trash.
-              <button
-                onClick={() => acts.restore(selected)}
-                className="ml-auto font-medium underline"
-              >
+              <button onClick={() => acts.restore(selected)} className="ml-auto font-medium underline">
                 Restore
               </button>
             </div>
@@ -350,13 +311,7 @@ function ToolBtn({
   );
 }
 
-function MoveMenu({
-  onMove,
-  folder,
-}: {
-  onMove: (f: string) => void;
-  folder: string;
-}) {
+function MoveMenu({ onMove, folder }: { onMove: (f: string) => void; folder: string }) {
   const targets = ["inbox", "spam", "trash", "archive"];
   return (
     <div className="group relative">
@@ -364,17 +319,15 @@ function MoveMenu({
         <MoveIcon className="h-4 w-4" />
       </ToolBtn>
       <div className="invisible absolute right-0 z-20 mt-1 w-40 rounded-xl border border-border/60 bg-popover p-1 opacity-0 shadow-lg transition-all group-hover:visible group-hover:opacity-100">
-        {targets
-          .filter((t) => t !== folder)
-          .map((t) => (
-            <button
-              key={t}
-              onClick={() => onMove(t)}
-              className="block w-full rounded-lg px-2 py-1.5 text-left text-sm capitalize hover:bg-accent"
-            >
-              Move to {t}
-            </button>
-          ))}
+        {targets.filter((t) => t !== folder).map((t) => (
+          <button
+            key={t}
+            onClick={() => onMove(t)}
+            className="block w-full rounded-lg px-2 py-1.5 text-left text-sm capitalize hover:bg-accent"
+          >
+            Move to {t}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -405,9 +358,7 @@ function LabelMenu({
               className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-sm capitalize hover:bg-accent"
             >
               {l}
-              <span className="text-[10px] text-muted-foreground">
-                {on ? "✓" : "+"}
-              </span>
+              <span className="text-[10px] text-muted-foreground">{on ? "✓" : "+"}</span>
             </button>
           );
         })}

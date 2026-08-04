@@ -229,3 +229,18 @@ class LLM:
             (m["content"] for m in self.instruct if m.get("role") == "system"),
             "You are an AI email management assistant. Be concise and helpful.",
         )
+
+    def generate(self, args, system_prompt, user_prompt, history=None):
+        """Stream a generative answer for the AI email assistant.
+
+        Used by the `mode: "generate"` request: the frontend sends the user's
+        instruction (prompt) plus the real Gmail email content (context), and
+        this streams a clean completion without touching the demo email store.
+        """
+        messages = [{"role": "system", "content": system_prompt}]
+        if isinstance(history, list):
+            for m in history[-6:]:
+                if isinstance(m, dict) and m.get("content"):
+                    messages.append({"role": m.get("role") or "user", "content": m["content"]})
+        messages.append({"role": "user", "content": user_prompt})
+        return self.stream(args, self._complete(messages))

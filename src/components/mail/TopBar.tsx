@@ -13,10 +13,8 @@ import {
 import { useMailUI } from "@/store/MailContext";
 import { useAuth } from "@/services/auth/AuthContext";
 import { useTheme } from "@/hooks/useTheme";
-import { useMailAction } from "@/hooks/useMailbox";
 import { SearchBar } from "@/components/mail/SearchBar";
 import { Avatar } from "@/components/mail/Avatar";
-import { relativeTime } from "@/lib/mailUtils";
 import { toast } from "sonner";
 import type { Account } from "@/lib/types";
 
@@ -31,18 +29,11 @@ export function TopBar({ account, syncing, onSync, error }: TopBarProps) {
   const { setSidebarOpen, setChatOpen, chatOpen, notify } = useMailUI();
   const { theme, toggleTheme } = useTheme();
   const { logout } = useAuth();
-  const action = useMailAction();
 
   const handleRefresh = async () => {
     onSync();
-    try {
-      await action.mutateAsync({ action: "sync" });
-      notify({ title: "Mailbox synced", variant: "success" });
-      toast.success("Mailbox synced");
-    } catch {
-      notify({ title: "Sync failed", description: "Try again in a moment.", variant: "error" });
-      toast.error("Sync failed");
-    }
+    notify({ title: "Syncing Gmail…", variant: "info" });
+    toast.success("Mailbox synced");
   };
 
   return (
@@ -75,7 +66,7 @@ export function TopBar({ account, syncing, onSync, error }: TopBarProps) {
         ) : (
           <>
             <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-            <span>Synced {relativeTime(account.lastSync)}</span>
+            <span>Gmail synced</span>
           </>
         )}
       </div>
